@@ -8,6 +8,7 @@ from transcribers.iec450 import IEC450Transcriber
 from transcribers.modbus import ModbusTranscriber
 from transcribers.nmea0183 import NMEA0183UDPTranscriber
 from transcribers.s7 import S7Transcriber
+from transcribers.mqtt import MqttTranscriber
 
 
 class IpalIdCounter:
@@ -35,6 +36,7 @@ all_transcribers = [
     ModbusTranscriber,
     NMEA0183UDPTranscriber,
     S7Transcriber,
+    MqttTranscriber
 ]
 
 
