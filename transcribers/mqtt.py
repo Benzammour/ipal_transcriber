@@ -6,7 +6,10 @@ import transcriber.settings as settings
 class MqttTranscriber(Transcriber):
     _name = "mqtt"
 
-    _func_to_addr_space = {
+    # _pkt_id_topic_map: (conn_id, mqtt_pkt_id) -> Topic
+    _pkt_id_topic_map = {}
+
+    _type_activity_map = {
         1: "command",
         2: "action",
         3: "inform",
@@ -23,140 +26,140 @@ class MqttTranscriber(Transcriber):
         14: "command"
     }
 
-    @classmethod
-    def state_identifier(cls, msg, key):
-        if msg.activity in [Activity.INTERROGATE, Activity.COMMAND]:
-            return "{}:{}".format(msg.dest, key)
-        elif msg.activity in [Activity.INFORM, Activity.ACTION]:
-            return "{}:{}".format(msg.src, key)
-        else:
-            settings.logger.critical("Unknown activity {}".format(msg.activity))
-            return "{}:{}".format(msg.src, key)
 
     def matches_protocol(self, pkt):
         return "MQTT" in pkt
 
     def parse_packet(self, pkt):
-        res = []
+        pkt_bytes = self.__bytearr_from_str(pkt["TCP"].payload)
 
-        id = self._id_counter.get_next_id()
         src = "{}:{}".format(pkt["IP"].src, pkt["TCP"].srcport)
         dest = "{}:{}".format(pkt["IP"].dst, pkt["TCP"].dstport)
-        msg_type = int(pkt["MQTT"].msgtype)
-        length = pkt["MQTT"].len
-        activity = self._func_to_addr_space[msg_type]
-        ts = float(pkt.sniff_time.timestamp())
-        
-        # Parse data:
-        data = {}
-        match msg_type:
-            case 3: # Publish
-                topic = pkt["MQTT"].topic
-                data[topic] = self.__bytearr_from_str(pkt["MQTT"].msg).decode("utf-8")
 
-            case 8: # Subscribe
-                topic = pkt["MQTT"].topic
-                data[topic] = None
-            
-            case 9: # SubACK
-                topic = None
-                data[topic] = None
-        
-        
-        return [ IpalMessage(
-            id=id,
-            src=src,
-            dest=dest,
-            protocol=self._name,
-            length=length,
-            type=msg_type,
-            activity=activity,
-            responds_to=[],
-            data=data,
-            timestamp=ts,
-        ) ]
+        res = []
+        pkt_offset = 0
+        for mqtt_pkt in pkt.get_multiple_layers("MQTT"):
 
-    def __bytearr_from_str(self, string):
+            next_id = self._id_counter.get_next_id()
+            length = mqtt_pkt.len
+            assert length == self.__mqtt_pkt_len(pkt_bytes[pkt_offset:]
+            msg_type = int(mqtt_pkt.msgtype)
+            activity = self._type_activity_map[msg_type]
+            ts = float(pkt.sniff_time.timestamp())
+
+            # Parse data:
+            data = {}
+            match msg_type:
+                case 3: # Publish
+                    topic = pkt["MQTT"].topic
+                    data[topic] = self.__bytearr_from_str(pkt["MQTT"].msg).decode("utf-8")
+
+                case 8: # Subscribe
+                    topic = pkt["MQTT"].topic
+                    data[topic] = None
+                    # Store the topic in self._pkt_id_topic_map for the corresponding SubACK
+                    self._pkt_id_topic_map[(conn_id, self.__parse_mqtt_pkt_id(pkt_bytes))] = topic
+
+                case 9: # SubACK
+                    topic = self._pkt_id_topic_map.pop((conn_id, self.__parse_mqtt_pkt_id(pkt_bytes)))
+                    data[topic] = None
+
+            # Save some information to set response_to later:
+            mqtt_msg_id = self.__parse_mqtt_pkt_id(pkt_bytes[pkt_offset:])
+            # For Connect, PubREC, PubREL, Subscribe, Unsub, PingREQ or Publish
+            add_to_request_queue = mst_type in [1, 5, 6, 8, 10, 12] or (mst_type == 3 and mqtt_pkt.qos in [1, 2])
+            # For ConnACK, PubACK, PubREC, PubREL, PubCOMP, SubACK, UnsubACK, PingRESP
+            match_to_requests = msg_type in [2, 4, 5, 6, 7, 9, 11, 13]
+
+            res.append( IpalMessage(
+                id=_next_id,
+                src=src,
+                dest=dest,
+                protocol=self._name,
+                length=length,
+                type=msg_type,
+                activity=activity,
+                responds_to=[],
+                data=data,
+                timestamp=ts,
+                _mqtt_msg_id=mqtt_msg_id,
+                _add_to_request_queue=add_to_request_queue,
+                _match_to_requests=match_to_requests,
+            ))
+
+            pkt_offset += length
+
+        return res
+
+
+    def match_response(self, requests, response):
+        match response.type:
+            case 2: # ConnACK
+                response.responds_to = [ipal_pkt.id for ipal_pkt in requests if ipal_pkt.type == 1]
+                return [ipal_pkt.id for ipal_pkt in requests if ipal_pkt.type == 1]
+
+            case 4 | 5 | 6 | 7 | 9 | 11: # PubACK, PubREC, PubREL, PubCOMP, SubACK, UnsubACK
+                res_to_type = [0, 0, 0, 0, 3, 3, 5, 6, 0, 8, 0, 10][type]
+                response.responds_to = [ipal_pkt.id for ipal_pkt in requests if ipal_pkt.type == res_to_type and ipal_pkt._mqtt_msg_id == response._mqtt_msg_id]
+                if len(res) == 0:
+                    settings.logger.critical("Found no request for ACK!")
+
+                if type in [4, 7, 9, 11]:
+                    return [ipal_pkt.id for ipal_pkt in requests if ipal_pkt._mqtt_msg_id == response._mqtt_msg_id]
+                else:
+                    return []
+
+            case 13: # PingRESP
+                # Choose the first PingRESP in the queue as the corresponding request:
+                first_ping_req_id = next(ipal_pkt.id for ipal_pkt in requests if ipal_pkt.type == 12)
+                if first_ping_req_id:
+                    response.responds_to = [first_ping_req_id]
+                    return [first_ping_req_id]
+                else:
+                    settings.logger.critical("Found no PingREQ for PingRESP!")
+                    return []
+
+            case _:
+                settings.logger.critical("Somehow match_response() was called on a non-ACK/non-PingRESP!")
+                return []
+
+
+    @staticmethod
+    def __bytearr_from_str(string):
         return bytes.fromhex(string.replace(":", ""))
 
+    @staticmethod
+    def __mqtt_pkt_len(pkt_bytes):
+        fixed_header_length = 2
+        length_index = 0
+        remaining_length = pkt_bytes[1] & 0xef # First bit is the continuation flag
+        while length_index < 3 and pkt_bytes[length_index + 1] & 0x80 == 0x80:
+            fixed_header_length += 1
+            length_index += 1
+            remaining_length += (128**length_index) * pkt_bytes[length_index + 1] & 0x80
 
+        return fixed_header_length + remaining_length
 
-"""
-        for i in range(len(adu_layers)):
+    @staticmethod
+    def __parse_mqtt_pkt_id(pkt_bytes):
+        # Calculate offset of variable header:
+        var_header_offset = 2
+        length_index = 0
+        while length_index < 3 and pkt_bytes[length_index + 1] & 0x80 == 0x80:
+            var_header_offset += 1
+            length_index += 1
 
-            adu = adu_layers[i]
-            mb = mb_layers[i]
+        match type:
+            case 1 | 2 | 12 | 13 | 14: # Connect, ConnACK, PingREQ, PingRESP, Disconnect
+                return None
 
-            length = 6 + int(adu.len)
-
-            if int(pkt["TCP"].srcport) == settings.MBTCP_PORT:  # Response
-
-                code = int(mb.func_code)
-
-                flow = (src, dest, int(adu.trans_id), code)
-
-                m = IpalMessage(
-                    id=self._id_counter.get_next_id(),
-                    src=src + ":{}".format(adu.unit_id),
-                    dest=dest,
-                    timestamp=float(pkt.sniff_time.timestamp()),
-                    protocol=self._name,
-                    flow=flow,
-                    length=length,
-                    type=code,
-                )
-
-                if "exception_code" in mb.field_names:
-                    self.transcribe_error_response(m, mb)
-                elif code in [1, 2, 3, 4]:
-                    self.transcribe_read_response(m, mb)
-                elif code in [5, 6, 15, 16]:
-                    self.transcribe_write_response(m, mb)
+            case 3: # Publish
+                if pkt["MQTT"].qos == '1' or pkt["MQTT"].qos == '2':
+                    topic_name_len = 0xff * pkt_bytes[var_header_offset] + pkt_bytes[var_header_offset + 1]
+                    mqtt_pkt_id_offset = var_header_offset + 2 + topic_name_len
+                    return 0xff * pkt_bytes[mqtt_pkt_id_offset] + pkt_bytes[mqtt_pkt_id_offset + 1]
                 else:
-                    m.activity = Activity.INFORM  # NOTE maybe not an accurate activity
-                    settings.logger.warning(
-                        "Not implemented response function code {}".format(mb.func_code)
-                    )  # msg.pdfdump()
-                res.append(m)
+                    return None
 
-            elif int(pkt["TCP"].dstport) == settings.MBTCP_PORT:  # Request
-                code = int(mb.func_code)
-
-                flow = (dest, src, int(adu.trans_id), code)
-
-                m = IpalMessage(
-                    id=self._id_counter.get_next_id(),
-                    src=src,
-                    dest=dest + ":{}".format(adu.unit_Id),
-                    timestamp=float(pkt.sniff_time.timestamp()),
-                    protocol=self._name,
-                    flow=flow,
-                    length=length,
-                    type=code,
-                )
-
-                if code in [1, 2, 3, 4]:
-                    self.transcribe_read_request(m, mb)
-                elif code in [5, 6, 15, 16]:
-                    self.transcribe_write_request(m, mb)
-                elif code == 8:
-                    self.transcribe_diagnostic(m, mb)
-                elif code == 43:
-                    self.transcribe_encapsulated_interface_transport_request(m, mb)
-                else:
-                    m.activity = (
-                        Activity.INTERROGATE
-                    )  # NOTE maybe not an appropriate activity
-                    settings.logger.warning(
-                        "Not implemented request function code {}".format(mb.func_code)
-                    )
-                res.append(m)
-
-            else:
-
-                settings.logger.critical(
-                    "Unknown ports for Modbus ({}, {})".format(
-                        pkt["TCP"].srcport, pkt["TCP"].dstport
-                    )
-                )
-        """
+            case 4 | 5 | 6 | 7 | 8 | 9 | 10, 11: # PubACK, PubREC, PubREL, PubCOMP, Subscribe, SubACK, Unsub, UnsubACK
+                return 0xff * pkt_bytes[var_header_offset] + pkt_bytes[var_header_offset + 1]
