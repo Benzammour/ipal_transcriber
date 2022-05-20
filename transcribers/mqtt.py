@@ -41,8 +41,7 @@ class MqttTranscriber(Transcriber):
         for mqtt_pkt in pkt.get_multiple_layers("MQTT"):
 
             next_id = self._id_counter.get_next_id()
-            length = mqtt_pkt.len
-            assert length == self.__mqtt_pkt_len(pkt_bytes[pkt_offset:]
+            length = self.__mqtt_pkt_len(pkt_bytes[pkt_offset:])
             msg_type = int(mqtt_pkt.msgtype)
             activity = self._type_activity_map[msg_type]
             ts = float(pkt.sniff_time.timestamp())
@@ -64,15 +63,8 @@ class MqttTranscriber(Transcriber):
                     topic = self._pkt_id_topic_map.pop((conn_id, self.__parse_mqtt_pkt_id(pkt_bytes)))
                     data[topic] = None
 
-            # Save some information to set response_to later:
-            mqtt_msg_id = self.__parse_mqtt_pkt_id(pkt_bytes[pkt_offset:])
-            # For Connect, PubREC, PubREL, Subscribe, Unsub, PingREQ or Publish
-            add_to_request_queue = mst_type in [1, 5, 6, 8, 10, 12] or (mst_type == 3 and mqtt_pkt.qos in [1, 2])
-            # For ConnACK, PubACK, PubREC, PubREL, PubCOMP, SubACK, UnsubACK, PingRESP
-            match_to_requests = msg_type in [2, 4, 5, 6, 7, 9, 11, 13]
-
-            res.append( IpalMessage(
-                id=_next_id,
+            new_msg = IpalMessage(
+                id=next_id,
                 src=src,
                 dest=dest,
                 protocol=self._name,
@@ -82,11 +74,16 @@ class MqttTranscriber(Transcriber):
                 responds_to=[],
                 data=data,
                 timestamp=ts,
-                _mqtt_msg_id=mqtt_msg_id,
-                _add_to_request_queue=add_to_request_queue,
-                _match_to_requests=match_to_requests,
-            ))
+            )
 
+            # Save some information to set response_to later:
+            new_msg._mqtt_msg_id = self.__parse_mqtt_pkt_id(pkt_bytes[pkt_offset:])
+            # For Connect, PubREC, PubREL, Subscribe, Unsub, PingREQ or Publish
+            new_msg._add_to_request_queue = msg_type in [1, 5, 6, 8, 10, 12] or (msg_type == 3 and mqtt_pkt.qos in [1, 2])
+            # For ConnACK, PubACK, PubREC, PubREL, PubCOMP, SubACK, UnsubACK, PingRESP
+            new_msg._match_to_requests = msg_type in [2, 4, 5, 6, 7, 9, 11, 13]
+
+            res.append(new_msg)
             pkt_offset += length
 
         return res
@@ -96,7 +93,7 @@ class MqttTranscriber(Transcriber):
         match response.type:
             case 2: # ConnACK
                 response.responds_to = [ipal_pkt.id for ipal_pkt in requests if ipal_pkt.type == 1]
-                return [ipal_pkt.id for ipal_pkt in requests if ipal_pkt.type == 1]
+                return [ipal_pkt for ipal_pkt in requests if ipal_pkt.type == 1]
 
             case 4 | 5 | 6 | 7 | 9 | 11: # PubACK, PubREC, PubREL, PubCOMP, SubACK, UnsubACK
                 res_to_type = [0, 0, 0, 0, 3, 3, 5, 6, 0, 8, 0, 10][type]
@@ -105,16 +102,16 @@ class MqttTranscriber(Transcriber):
                     settings.logger.critical("Found no request for ACK!")
 
                 if type in [4, 7, 9, 11]:
-                    return [ipal_pkt.id for ipal_pkt in requests if ipal_pkt._mqtt_msg_id == response._mqtt_msg_id]
+                    return [ipal_pkt for ipal_pkt in requests if ipal_pkt._mqtt_msg_id == response._mqtt_msg_id]
                 else:
                     return []
 
             case 13: # PingRESP
                 # Choose the first PingRESP in the queue as the corresponding request:
-                first_ping_req_id = next(ipal_pkt.id for ipal_pkt in requests if ipal_pkt.type == 12)
-                if first_ping_req_id:
-                    response.responds_to = [first_ping_req_id]
-                    return [first_ping_req_id]
+                first_ping_req = next(ipal_pkt for ipal_pkt in requests if ipal_pkt.type == 12)
+                if first_ping_req:
+                    response.responds_to = [first_ping_req.id]
+                    return [first_ping_req]
                 else:
                     settings.logger.critical("Found no PingREQ for PingRESP!")
                     return []
