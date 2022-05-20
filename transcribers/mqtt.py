@@ -6,7 +6,7 @@ import transcriber.settings as settings
 class MqttTranscriber(Transcriber):
     _name = "mqtt"
 
-    # _pkt_id_topic_map: (conn_id, mqtt_pkt_id) -> Topic
+    # _pkt_id_topic_map: (src, dst, mqtt_pkt_id) -> Topic
     _pkt_id_topic_map = {}
 
     _type_activity_map = {
@@ -57,10 +57,11 @@ class MqttTranscriber(Transcriber):
                     topic = pkt["MQTT"].topic
                     data[topic] = None
                     # Store the topic in self._pkt_id_topic_map for the corresponding SubACK
-                    self._pkt_id_topic_map[(conn_id, self.__parse_mqtt_pkt_id(pkt_bytes))] = topic
+                    self._pkt_id_topic_map[(src, dest, self.__parse_mqtt_pkt_id(pkt_bytes))] = topic
 
                 case 9: # SubACK
-                    topic = self._pkt_id_topic_map.pop((conn_id, self.__parse_mqtt_pkt_id(pkt_bytes)))
+                    # To access the saved topic, we need to transpose src and dest:
+                    topic = self._pkt_id_topic_map.pop((dest, src, self.__parse_mqtt_pkt_id(pkt_bytes)))
                     data[topic] = None
 
             new_msg = IpalMessage(
@@ -96,9 +97,9 @@ class MqttTranscriber(Transcriber):
                 return [ipal_pkt for ipal_pkt in requests if ipal_pkt.type == 1]
 
             case 4 | 5 | 6 | 7 | 9 | 11: # PubACK, PubREC, PubREL, PubCOMP, SubACK, UnsubACK
-                res_to_type = [0, 0, 0, 0, 3, 3, 5, 6, 0, 8, 0, 10][type]
+                res_to_type = [0, 0, 0, 0, 3, 3, 5, 6, 0, 8, 0, 10][response.type]
                 response.responds_to = [ipal_pkt.id for ipal_pkt in requests if ipal_pkt.type == res_to_type and ipal_pkt._mqtt_msg_id == response._mqtt_msg_id]
-                if len(res) == 0:
+                if len(response.responds_to) == 0:
                     settings.logger.critical("Found no request for ACK!")
 
                 if type in [4, 7, 9, 11]:
