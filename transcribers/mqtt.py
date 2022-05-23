@@ -30,8 +30,8 @@ class MqttTranscriber(Transcriber):
         return "MQTT" in pkt
 
     def parse_packet(self, pkt):
-        src = "{}:{}".format(pkt["IPv6"].src, pkt["TCP"].srcport)
-        dest = "{}:{}".format(pkt["IPv6"].dst, pkt["TCP"].dstport)
+        src = "{}:{}".format(pkt["IP"].src, pkt["TCP"].srcport)
+        dest = "{}:{}".format(pkt["IP"].dst, pkt["TCP"].dstport)
 
         res = []
         pkt_offset = 0
@@ -102,15 +102,18 @@ class MqttTranscriber(Transcriber):
                     and ipal_pkt.dest == response.src]
 
                 response.responds_to = [packet.id for packet in responds_to_packets]
-                
+
                 if len(response.responds_to) == 0:
                     settings.logger.critical("Found no request for ACK!")
 
                 # Publish ACK
-                if response.type == 4: 
+                if response.type == 4:
                     return responds_to_packets
-                elif response.type in [7, 9, 11]:   # WIP
-                    return [ipal_pkt for ipal_pkt in requests if ipal_pkt._mqtt_msg_id == response._mqtt_msg_id]
+                elif response.type in [7, 9, 11]: 
+                    return [ipal_pkt for ipal_pkt in requests
+                        if ipal_pkt._mqtt_msg_id == response._mqtt_msg_id 
+                            and (ipal_pkt.src == response.dest or ipal_pkt.src == response.src)
+                            and (ipal_pkt.dest == response.dest or ipal_pkt.dest == response.src)]
                 else:
                     return []
 
@@ -144,8 +147,8 @@ class MqttTranscriber(Transcriber):
                 if mqtt_pkt.qos == '1' or mqtt_pkt.qos == '2':
                     return mqtt_pkt.msgid
                 return None
+
+            
                 
-            case 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11: # PubACK, PubREC, PubREL, PubCOMP, Subscribe, SubACK, Unsub, UnsubACK
+            case 4 | 5 | 6 | 7| 8 | 9 | 10 | 11: # PubACK, PubREC, PubREL, PubCOMP, Subscribe, SubACK, Unsub, UnsubACK
                 return mqtt_pkt.msgid
-
-
