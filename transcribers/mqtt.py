@@ -10,20 +10,20 @@ class MqttTranscriber(Transcriber):
     _pkt_id_topic_map = {}
 
     _type_activity_map = {
-        1: "command",
-        2: "action",
-        3: "inform",
-        4: "action",
-        5: "action",
-        6: "action",
-        7: "command",
-        8: "interrogate",
-        9: "inform",
-        10: "command",
-        11: "action",
-        12: "interrogate",
-        13: "inform",
-        14: "command"
+        1: Activity.COMMAND,
+        2: Activity.ACTION,
+        3: Activity.INFORM,
+        4: Activity.ACTION,
+        5: Activity.ACTION,
+        6: Activity.ACTION,
+        7: Activity.COMMAND,
+        8: Activity.INTERROGATE,
+        9: Activity.INFORM,
+        10: Activity.COMMAND,
+        11: Activity.ACTION,
+        12: Activity.INTERROGATE,
+        13: Activity.INFORM,
+        14: Activity.COMMAND
     }
 
 
@@ -102,7 +102,7 @@ class MqttTranscriber(Transcriber):
                 if len(response.responds_to) == 0:
                     settings.logger.critical("Found no request for ACK!")
 
-                if type in [4, 7, 9, 11]:
+                if response.type in [4, 7, 9, 11]:
                     return [ipal_pkt for ipal_pkt in requests if ipal_pkt._mqtt_msg_id == response._mqtt_msg_id]
                 else:
                     return []
