@@ -30,10 +30,8 @@ class MqttTranscriber(Transcriber):
         return "MQTT" in pkt
 
     def parse_packet(self, pkt):
-        pkt_bytes = self.__bytearr_from_str(pkt["TCP"].payload)
-
-        src = "{}:{}".format(pkt["IP"].src, pkt["TCP"].srcport)
-        dest = "{}:{}".format(pkt["IP"].dst, pkt["TCP"].dstport)
+        src = "{}:{}".format(pkt["IPv6"].src, pkt["TCP"].srcport)
+        dest = "{}:{}".format(pkt["IPv6"].dst, pkt["TCP"].dstport)
 
         res = []
         pkt_offset = 0
@@ -57,7 +55,6 @@ class MqttTranscriber(Transcriber):
                     data[topic] = None
                     # Store the topic in self._pkt_id_topic_map for the corresponding SubACK
                     self._pkt_id_topic_map[(src, dest, mqtt_pkt.msgid)] = topic
-                    #self._pkt_id_topic_map[(src, dest, self.__parse_mqtt_pkt_id(mqtt_pkt))] = topic
 
                 case 9: # SubACK
                     # To access the saved topic, we need to transpose src and dest:
@@ -80,7 +77,7 @@ class MqttTranscriber(Transcriber):
             # Save some information to set response_to later:
             new_msg._mqtt_msg_id = self.__parse_mqtt_pkt_id(mqtt_pkt)
             # For Connect, PubREC, PubREL, Subscribe, Unsub, PingREQ or Publish
-            new_msg._add_to_request_queue = (msg_type in [1, 5, 6, 8, 10, 12]) or (msg_type == 3 and mqtt_pkt.qos in [1, 2])
+            new_msg._add_to_request_queue = (msg_type in [1, 5, 6, 8, 10, 12]) or (msg_type == 3 and mqtt_pkt.qos in ['1', '2'])
             # For ConnACK, PubACK, PubREC, PubREL, PubCOMP, SubACK, UnsubACK, PingRESP
             new_msg._match_to_requests = msg_type in [2, 4, 5, 6, 7, 9, 11, 13]
 
@@ -98,11 +95,21 @@ class MqttTranscriber(Transcriber):
 
             case 4 | 5 | 6 | 7 | 9 | 11: # PubACK, PubREC, PubREL, PubCOMP, SubACK, UnsubACK
                 res_to_type = [0, 0, 0, 0, 3, 3, 5, 6, 0, 8, 0, 10][response.type]
-                response.responds_to = [ipal_pkt.id for ipal_pkt in requests if ipal_pkt.type == res_to_type and ipal_pkt._mqtt_msg_id == response._mqtt_msg_id]
+
+                responds_to_packets = [ipal_pkt for ipal_pkt in requests if ipal_pkt.type == res_to_type 
+                    and ipal_pkt._mqtt_msg_id == response._mqtt_msg_id 
+                    and ipal_pkt.src == response.dest
+                    and ipal_pkt.dest == response.src]
+
+                response.responds_to = [packet.id for packet in responds_to_packets]
+                
                 if len(response.responds_to) == 0:
                     settings.logger.critical("Found no request for ACK!")
 
-                if response.type in [4, 7, 9, 11]:
+                # Publish ACK
+                if response.type == 4: 
+                    return responds_to_packets
+                elif response.type in [7, 9, 11]:   # WIP
                     return [ipal_pkt for ipal_pkt in requests if ipal_pkt._mqtt_msg_id == response._mqtt_msg_id]
                 else:
                     return []
@@ -127,22 +134,18 @@ class MqttTranscriber(Transcriber):
         return bytes.fromhex(string.replace(":", ""))
 
     @staticmethod
-    def __parse_mqtt_pkt_id(pkt):
-        match pkt.msgtype:
+    def __parse_mqtt_pkt_id(mqtt_pkt):
+        # print(int(mqtt_pkt.msgtype))
+        match int(mqtt_pkt.msgtype):
             case 1 | 2 | 12 | 13 | 14: # Connect, ConnACK, PingREQ, PingRESP, Disconnect
                 return None
 
             case 3: # Publish
-                """
-                if pkt["MQTT"].qos == '1' or pkt["MQTT"].qos == '2':
-                    topic_name_len = 0xff * pkt_bytes[var_header_offset] + pkt_bytes[var_header_offset + 1]
-                    mqtt_pkt_id_offset = var_header_offset + 2 + topic_name_len
-                    return 0xff * pkt_bytes[mqtt_pkt_id_offset] + pkt_bytes[mqtt_pkt_id_offset + 1]
-                else:
-                """
+                if mqtt_pkt.qos == '1' or mqtt_pkt.qos == '2':
+                    return mqtt_pkt.msgid
                 return None
+                
+            case 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11: # PubACK, PubREC, PubREL, PubCOMP, Subscribe, SubACK, Unsub, UnsubACK
+                return mqtt_pkt.msgid
 
-            case 4 | 5 | 6 | 7 | 8 | 9 | 10, 11: # PubACK, PubREC, PubREL, PubCOMP, Subscribe, SubACK, Unsub, UnsubACK
-                #return 0xff * pkt_bytes[var_header_offset] + pkt_bytes[var_header_offset + 1]
-                return None
 
