@@ -78,7 +78,6 @@ class MqttTranscriber(Transcriber):
                 length=length,
                 type=msg_type,
                 activity=activity,
-                responds_to=[],
                 data=data,
                 timestamp=ts,
             )
